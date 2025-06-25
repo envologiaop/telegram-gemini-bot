@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: telegram-gemini-bot
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt && python -c 'import app; app.setup_database()'"
+    startCommand: "gunicorn app:app"
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - fromDatabase:
+          name: gemini-bot-db
+          property: connectionString
+
+databases:
+  - name: gemini-bot-db
+    plan: free
