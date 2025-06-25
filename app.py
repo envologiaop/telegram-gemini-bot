@@ -2,11 +2,12 @@ import os
 import logging
 import io
 import psycopg2
-import psycopg2.extras # Needed for Json
+import psycopg2.extras
 from flask import Flask, request, jsonify
 import telegram
 import google.generativeai as genai
-from pydub import AudioSegment
+
+# NOTE: We have removed 'from pydub import AudioSegment'
 
 # --- Configuration ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -91,22 +92,18 @@ def save_chat_history(chat_id, history):
     conn.close()
 
 def process_with_gemini(chat_id, parts):
-    """Processes input with Gemini, maintaining conversation history (Synchronous Version)."""
+    """Processes input with Gemini, maintaining conversation history."""
     if not model:
         return "Error: The AI model is not initialized. Please check the server logs."
-
     history = get_chat_history(chat_id)
     chat = model.start_chat(history=history)
-
     try:
         response = chat.send_message(parts)
         ai_response_text = response.text
-        
         serializable_history = [
             {'role': msg.role, 'parts': [part.text for part in msg.parts]} for msg in chat.history
         ]
         save_chat_history(chat_id, serializable_history)
-
         return ai_response_text
     except Exception as e:
         logger.error(f"Error communicating with Gemini for chat {chat_id}: {e}")
@@ -131,7 +128,6 @@ def webhook():
         user_message = update.effective_message
         
         parts = []
-        
         bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING)
 
         text = user_message.text or user_message.caption
@@ -146,20 +142,13 @@ def webhook():
         if user_message.voice:
             voice_file = bot.get_file(user_message.voice.file_id)
             voice_ogg_bytes = io.BytesIO(voice_file.download_as_bytearray())
-            
-            audio = AudioSegment.from_ogg(voice_ogg_bytes)
-            voice_mp3_bytes = io.BytesIO()
-            audio.export(voice_mp3_bytes, format="mp3")
-            voice_mp3_bytes.seek(0)
-            
-            parts.append({"mime_type": "audio/mp3", "data": voice_mp3_bytes.getvalue()})
+            # THIS IS THE SIMPLIFIED PART: No more pydub conversion
+            parts.append({"mime_type": "audio/ogg", "data": voice_ogg_bytes.getvalue()})
         
         if not parts:
-            logger.warning("Received an update with no processable content.")
             return jsonify(status="ok")
             
         ai_response = process_with_gemini(chat_id, parts)
-
         bot.send_message(chat_id=chat_id, text=ai_response)
         
         return jsonify(status="ok")
@@ -167,11 +156,10 @@ def webhook():
         logger.error(f"Error in webhook: {e}", exc_info=True)
         if 'chat_id' in locals():
             try:
-                bot.send_message(chat_id=chat_id, text="Oh no! Something went wrong on my end. The developers have been notified.")
+                bot.send_message(chat_id=chat_id, text="Oh no! Something went wrong on my end.")
             except Exception as e_send:
                  logger.error(f"Failed to even send error message to chat {chat_id}: {e_send}")
         return jsonify(status="error", message="Internal Server Error"), 500
 
-# This part is only for local execution, not for Render
 if __name__ == "__main__":
     app.run(debug=True)
