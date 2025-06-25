@@ -7,8 +7,6 @@ from flask import Flask, request, jsonify
 import telegram
 import google.generativeai as genai
 
-# NOTE: We have removed 'from pydub import AudioSegment'
-
 # --- Configuration ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -109,7 +107,16 @@ def process_with_gemini(chat_id, parts):
         logger.error(f"Error communicating with Gemini for chat {chat_id}: {e}")
         return "Sorry, I encountered an error while processing your request."
 
-# --- Flask Webhook Route ---
+# =================================================================
+# === NEW HEALTH CHECK ROUTE FOR RENDER ===========================
+# =================================================================
+@app.route('/', methods=['GET'])
+def health_check():
+    """This route is used by Render to check if the app is live."""
+    return "OK", 200
+# =================================================================
+
+# --- Main Telegram Webhook Route ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """This function handles updates from Telegram."""
@@ -142,7 +149,6 @@ def webhook():
         if user_message.voice:
             voice_file = bot.get_file(user_message.voice.file_id)
             voice_ogg_bytes = io.BytesIO(voice_file.download_as_bytearray())
-            # THIS IS THE SIMPLIFIED PART: No more pydub conversion
             parts.append({"mime_type": "audio/ogg", "data": voice_ogg_bytes.getvalue()})
         
         if not parts:
@@ -162,4 +168,5 @@ def webhook():
         return jsonify(status="error", message="Internal Server Error"), 500
 
 if __name__ == "__main__":
+    # This part does not run on Render
     app.run(debug=True)
