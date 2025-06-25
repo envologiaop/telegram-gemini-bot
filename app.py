@@ -2,16 +2,16 @@ import os
 import logging
 import io
 import psycopg2
+import psycopg2.extras # Needed for Json
 from flask import Flask, request, jsonify
 import telegram
 import google.generativeai as genai
 from pydub import AudioSegment
 
 # --- Configuration ---
-# Fetch configuration from environment variables
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL") # Provided by Render
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # --- Basic Setup & Logging ---
 logging.basicConfig(
@@ -55,8 +55,6 @@ try:
     logger.info("Google Gemini AI Model initialized successfully.")
 except Exception as e:
     logger.error(f"Failed to initialize Gemini AI: {e}")
-    # We don't raise an error here, to allow the app to start
-    # and report issues via logs.
     model = None
 
 # --- Telegram Bot Setup ---
@@ -68,7 +66,6 @@ except Exception as e:
     bot = None
 
 # --- Core Bot Logic ---
-
 def get_chat_history(chat_id):
     """Retrieves conversation history for a given chat_id."""
     conn = get_db_connection()
@@ -83,7 +80,6 @@ def save_chat_history(chat_id, history):
     """Saves or updates conversation history for a given chat_id."""
     conn = get_db_connection()
     cur = conn.cursor()
-    # Use INSERT ... ON CONFLICT to either insert a new record or update an existing one
     cur.execute("""
         INSERT INTO conversation_history (chat_id, history)
         VALUES (%s, %s)
@@ -94,9 +90,8 @@ def save_chat_history(chat_id, history):
     cur.close()
     conn.close()
 
-
-async def process_with_gemini(chat_id, parts):
-    """Processes input with Gemini, maintaining conversation history."""
+def process_with_gemini(chat_id, parts):
+    """Processes input with Gemini, maintaining conversation history (Synchronous Version)."""
     if not model:
         return "Error: The AI model is not initialized. Please check the server logs."
 
@@ -104,20 +99,18 @@ async def process_with_gemini(chat_id, parts):
     chat = model.start_chat(history=history)
 
     try:
-        # Send the new parts to the model
-        response = await chat.send_message_async(parts)
+        response = chat.send_message(parts)
         ai_response_text = response.text
-
-        # Update the history with the new user input and model response
-        # Note: Gemini Python SDK automatically manages history within the 'chat' object.
-        # We save the updated history back to the database.
-        save_chat_history(chat_id, chat.history)
+        
+        serializable_history = [
+            {'role': msg.role, 'parts': [part.text for part in msg.parts]} for msg in chat.history
+        ]
+        save_chat_history(chat_id, serializable_history)
 
         return ai_response_text
     except Exception as e:
         logger.error(f"Error communicating with Gemini for chat {chat_id}: {e}")
         return "Sorry, I encountered an error while processing your request."
-
 
 # --- Flask Webhook Route ---
 @app.route('/webhook', methods=['POST'])
@@ -130,61 +123,55 @@ def webhook():
     try:
         update_data = request.get_json(force=True)
         update = telegram.Update.de_json(update_data, bot)
+        
+        if not update.effective_message:
+            return jsonify(status="ok", message="No effective message in update")
 
         chat_id = update.effective_chat.id
         user_message = update.effective_message
-
+        
         parts = []
-
-        # Acknowledge receipt immediately
+        
         bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING)
 
-        # 1. Handle Text and Captions
         text = user_message.text or user_message.caption
         if text:
             parts.append({"text": text})
 
-        # 2. Handle Photo
         if user_message.photo:
             photo_file = bot.get_file(user_message.photo[-1].file_id)
             photo_bytes = io.BytesIO(photo_file.download_as_bytearray())
             parts.append({"mime_type": "image/jpeg", "data": photo_bytes.getvalue()})
 
-        # 3. Handle Voice
         if user_message.voice:
             voice_file = bot.get_file(user_message.voice.file_id)
             voice_ogg_bytes = io.BytesIO(voice_file.download_as_bytearray())
-
-            # Convert OGG to MP3
+            
             audio = AudioSegment.from_ogg(voice_ogg_bytes)
             voice_mp3_bytes = io.BytesIO()
             audio.export(voice_mp3_bytes, format="mp3")
             voice_mp3_bytes.seek(0)
-
+            
             parts.append({"mime_type": "audio/mp3", "data": voice_mp3_bytes.getvalue()})
-
+        
         if not parts:
             logger.warning("Received an update with no processable content.")
             return jsonify(status="ok")
+            
+        ai_response = process_with_gemini(chat_id, parts)
 
-        # Process with Gemini
-        import asyncio
-        ai_response = asyncio.run(process_with_gemini(chat_id, parts))
-
-        # Send the response back to the user
         bot.send_message(chat_id=chat_id, text=ai_response)
-
+        
         return jsonify(status="ok")
     except Exception as e:
         logger.error(f"Error in webhook: {e}", exc_info=True)
+        if 'chat_id' in locals():
+            try:
+                bot.send_message(chat_id=chat_id, text="Oh no! Something went wrong on my end. The developers have been notified.")
+            except Exception as e_send:
+                 logger.error(f"Failed to even send error message to chat {chat_id}: {e_send}")
         return jsonify(status="error", message="Internal Server Error"), 500
 
-
+# This part is only for local execution, not for Render
 if __name__ == "__main__":
-    # This part is for local testing and should not run on Render
-    logger.warning("This script is meant to be run with a Gunicorn server on Render.")
-    logger.warning("Running in local debug mode.")
-    # For local testing, you would need to set up environment variables manually
-    # and use a tool like ngrok to expose your localhost to the internet for Telegram's webhook.
-    app.run(debug=True, port=5000)
-
+    app.run(debug=True)
