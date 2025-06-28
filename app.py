@@ -2,7 +2,7 @@ import os
 import logging
 import asyncio
 import sys
-from threading import Thread
+from threading import Thread, Event
 from flask import Flask
 
 # --- Unified Logging Setup ---
@@ -10,7 +10,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 # --- Flask App for Render Health Checks ---
-# The Flask app instance MUST be named 'app' for Gunicorn to find it.
 app = Flask(__name__)
 bot_status = "Starting..."
 
@@ -93,33 +92,39 @@ async def forget_ai_handler(client, message):
         await message.edit_text("`No history to clear.`")
 
 # --- Main Execution Logic ---
+shutdown_event = Event()
+
+async def main_bot_loop():
+    """The main async loop for the bot."""
+    global bot_status
+    await pyro_client.start()
+    me = await pyro_client.get_me()
+    bot_status = f"Running as {me.first_name}"
+    logger.info(f"Userbot started successfully as {me.first_name}")
+    # This keeps the bot alive until the shutdown_event is set
+    await shutdown_event.wait()
+    await pyro_client.stop()
+    logger.info("Userbot stopped gracefully.")
+
 def run_pyrogram_bot():
-    """Target function for the bot thread. This runs the bot's main loop."""
+    """Target function for the bot thread."""
     global bot_status
     try:
         logger.info("Pyrogram bot thread is starting...")
-        pyro_client.start()
-        me = pyro_client.get_me()
-        bot_status = f"Running as {me.first_name}"
-        logger.info(f"Userbot started successfully as {me.first_name}")
-        pyro_client.idle()
-        bot_status = "Stopped"
-        logger.info("Userbot stopped gracefully.")
+        asyncio.run(main_bot_loop())
     except Exception as e:
         bot_status = f"Crashed: {e}"
         logger.critical(f"Pyrogram bot thread crashed unexpectedly: {e}", exc_info=True)
 
-# --- START THE BOT THREAD AT MODULE LEVEL ---
-# This code runs ONE TIME when Gunicorn loads the file.
+# --- Start The Bot Thread ---
 logger.info("Initializing bot thread...")
 bot_thread = Thread(target=run_pyrogram_bot)
 bot_thread.daemon = True
 bot_thread.start()
-# --- END OF BOT THREAD START ---
 
-# The if __name__ block is now ONLY for local testing and not used by Render.
+# --- Local Testing Block (not used by Render/Gunicorn) ---
 if __name__ == '__main__':
     logger.info("Running in local development mode. The bot thread is already started.")
-    # Use a different port for local testing to avoid conflicts
     port = int(os.environ.get("PORT", 8081))
+    # This runs the Flask app for local testing
     app.run(host='0.0.0.0', port=port)
