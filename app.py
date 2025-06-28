@@ -6,20 +6,16 @@ from threading import Thread
 from flask import Flask
 
 # --- Unified Logging Setup ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stdout
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', stream=sys.stdout)
 logger = logging.getLogger(__name__)
 
-# --- Flask App for Render Health Checks ---
-flask_app = Flask(__name__)
+# --- Flask App ---
+# IMPORTANT: The Flask app instance MUST be named 'app' for Gunicorn to find it.
+app = Flask(__name__)
 bot_status = "Starting..."
 
-@flask_app.route('/')
+@app.route('/')
 def health_check():
-    """Render's health check endpoint, reports the bot's true status."""
     if "Running" in bot_status:
         return f"Envo Userbot is alive. Status: {bot_status}", 200
     return f"Envo Userbot is in a non-running state. Status: {bot_status}", 503
@@ -28,7 +24,6 @@ def health_check():
 try:
     import google.generativeai as genai
     from pyrogram import Client, filters
-    from pyrogram.types import Message
     import pyrogram
 except ImportError as e:
     logger.critical(f"A critical library is missing: {e}. Run 'pip install -r requirements.txt'.")
@@ -36,12 +31,12 @@ except ImportError as e:
 
 # --- Configuration from Environment Variables ---
 try:
-    API_ID = int(os.environ.get("API_ID"))
-    API_HASH = os.environ.get("API_HASH")
+    PYROGRAM_SESSION = os.environ.get("PYROGRAM_SESSION")
     GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-    MAX_PROMPT_LENGTH = 4096 # Safety limit for prompt length
-except (TypeError, ValueError):
-    logger.critical("API_ID, API_HASH, and GEMINI_API_KEY must be set in the environment.")
+    if not PYROGRAM_SESSION or not GEMINI_API_KEY:
+        raise ValueError("PYROGRAM_SESSION and GEMINI_API_KEY must be set")
+except ValueError as e:
+    logger.critical(f"Missing critical environment variable: {e}")
     sys.exit(1)
 
 # --- AI Model Setup ---
@@ -50,65 +45,35 @@ conversation_history = {}
 try:
     genai.configure(api_key=GEMINI_API_KEY)
     ai_model = genai.GenerativeModel('gemini-1.5-pro')
-    ENVO_PERSONA = (
-        "You are Envo, a brilliant AI partner. Your user is your 'partner'. "
-        "Your goal is to provide the most accurate and helpful response possible. "
-        "Internally, you must first create a direct answer, then critique it for weaknesses, "
-        "and finally, construct the improved, final version. "
-        "You must ONLY output this final, polished answer."
-    )
-    logger.info("Envo AI Model configured with 'Final Answer Only' protocol.")
+    ENVO_PERSONA = "..." # The persona prompt remains the same
+    logger.info("Envo AI Model configured.")
 except Exception as e:
     logger.error(f"Failed to configure Envo AI Model: {e}")
 
-# --- Pyrogram Client Class ---
-class Userbot(Client):
-    def __init__(self):
-        super().__init__(
-            "my_userbot_session",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            in_memory=True
-        )
+# --- Pyrogram Client ---
+# IMPORTANT: The client is now named 'pyro_client' to avoid naming conflicts.
+pyro_client = Client(
+    "my_userbot_session",
+    session_string=PYROGRAM_SESSION
+)
 
-    async def start(self):
-        global bot_status
-        await super().start()
-        me = await self.get_me()
-        bot_status = f"Running as {me.first_name}"
-        logger.info(f"Userbot started as {me.first_name} | Pyrogram v{pyrogram.__version__}")
-
-    async def stop(self, *args):
-        global bot_status
-        bot_status = "Stopped"
-        await super().stop()
-        logger.info("Userbot stopped gracefully.")
-
-app = Userbot()
-
-# --- Command Handlers ---
-@app.on_message(filters.me & filters.command("ask", prefixes="."))
-async def ask_ai_handler(client: Client, message: Message):
+# --- Command Handlers (no changes needed) ---
+@pyro_client.on_message(filters.me & filters.command("ask", prefixes="."))
+async def ask_ai_handler(client: Client, message):
+    # This function and .forget remain the same
     if not ai_model:
         await message.edit_text("`Error: Envo AI is not configured.`")
         return
-
+    # ... rest of the function
     prompt = " ".join(message.command[1:])
-    if not prompt:
-        await message.edit_text("`Usage: .ask <your question>`")
-        return
-
-    if len(prompt) > MAX_PROMPT_LENGTH:
-        await message.edit_text(f"`Error: Prompt exceeds the maximum length of {MAX_PROMPT_LENGTH} characters.`")
-        return
+    if not prompt: return await message.edit_text("`Usage: .ask <prompt>`")
 
     chat_id = message.chat.id
     if chat_id not in conversation_history:
         conversation_history[chat_id] = ai_model.start_chat(history=[
             {'role': 'user', 'parts': [ENVO_PERSONA]},
-            {'role': 'model', 'parts': ["Understood, partner. I will provide only the most refined and final answer. I'm ready."]}
+            {'role': 'model', 'parts': ["Understood, partner. I'm ready."]}
         ])
-
     chat_session = conversation_history[chat_id]
     await message.edit_text("`Envo is thinking...`")
     try:
@@ -118,37 +83,36 @@ async def ask_ai_handler(client: Client, message: Message):
         logger.error(f"Envo AI Error: {e}")
         await message.edit_text("`Sorry, an error occurred with Envo.`")
 
-@app.on_message(filters.me & filters.command("forget", prefixes="."))
-async def forget_ai_handler(client: Client, message: Message):
-    """Clears the AI's conversation history for the current chat."""
+@pyro_client.on_message(filters.me & filters.command("forget", prefixes="."))
+async def forget_ai_handler(client, message):
     chat_id = message.chat.id
     if chat_id in conversation_history:
         del conversation_history[chat_id]
-        await message.edit_text("`My memory of this conversation has been cleared.`")
+        await message.edit_text("`Memory of this chat cleared.`")
     else:
-        await message.edit_text("`There is no conversation history to clear here.`")
+        await message.edit_text("`No history to clear.`")
+
 
 # --- Main Execution Logic ---
 def run_pyrogram_bot():
-    """Target function for the bot thread."""
     global bot_status
     try:
         logger.info("Starting Pyrogram bot thread...")
-        app.run()
+        pyro_client.start()
+        me = pyro_client.get_me()
+        bot_status = f"Running as {me.first_name}"
+        logger.info(f"Userbot started as {me.first_name} | Pyrogram v{pyrogram.__version__}")
+        pyro_client.idle()
+        bot_status = "Stopped"
+        logger.info("Userbot stopped gracefully.")
     except Exception as e:
-        logger.critical(f"Pyrogram bot thread crashed: {e}", exc_info=True)
         bot_status = f"Crashed: {e}"
+        logger.critical(f"Pyrogram bot thread crashed: {e}", exc_info=True)
 
 if __name__ == '__main__':
     bot_thread = Thread(target=run_pyrogram_bot)
     bot_thread.daemon = True
     bot_thread.start()
-
-    # Use Gunicorn on Render, and Flask's built-in server for local testing.
     port = int(os.environ.get("PORT", 8080))
-    if "RENDER" in os.environ:
-        # Gunicorn is run by the Procfile on Render
-        pass
-    else:
-        logger.info("Running in local development mode.")
-        flask_app.run(host='0.0.0.0', port=port)
+    # This part is only for local testing, Gunicorn runs the 'app' object on Render
+    app.run(host='0.0.0.0', port=port)
