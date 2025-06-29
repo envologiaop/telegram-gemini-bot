@@ -1,1 +1,1 @@
-web: gunicorn app:app --log-file - --access-logfile - --error-logfile -
+web: gunicorn --workers 1 --threads 4 app:app
